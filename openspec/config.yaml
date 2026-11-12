@@ -1,0 +1,10 @@
+schema: spec-driven
+
+context: |
+  Project: MedVault Crypto API (Backend Python em FastAPI + SQLAlchemy 2.0 Async).
+  Language convention: Code, identifiers, database columns, and HTTP routes in English; documentation, docstrings, and OpenSpec artifacts in Brazilian Portuguese (PT-BR).
+  Architecture: Clean Layered Architecture in `src/app/` (core, models, schemas, repositories, services, api/v1).
+  Cryptography pillars:
+    1. Field Encryption: Per-user 256-bit DEK derived via HKDF-SHA256(APP_ENCRYPTION_PEPPER + user_salt) + AES-256-GCM (96-bit random nonce + AAD bound to `user:<user_id>|field:<field_name>`).
+    2. Searchable Encryption: Blind Index via HMAC-SHA256(APP_BLIND_INDEX_PEPPER, `<field>:<normalized_value>`).
+    3. Password Hashing: HMAC-SHA256(APP_PASSWORD_PEPPER, password) + Argon2id with 16-byte random salt.
