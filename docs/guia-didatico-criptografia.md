@@ -1,121 +1,115 @@
 # Guia Didático Completo: Criptografia de Dados no Banco de Dados
 
-> **Material de referência para aulas, palestras, treinamentos de engenharia e demonstrações ao vivo usando o MedVault Crypto API.**
+> **Material de referência para estudos, aulas, palestras e treinamentos de engenharia de segurança utilizando o MedVault Crypto API.**
 
 ---
 
-## 1. A Grande Confusão: Hash vs. Criptografia vs. Codificação
+## 🧭 Introdução: Por que proteger o Banco de Dados?
 
-Antes de falar em *Salt*, *Pepper* ou *AES-GCM*, é essencial distinguir três conceitos que frequentemente são confundidos no dia a dia de desenvolvimento:
+Em qualquer aplicação conectada à internet, adota-se comumente a proteção da conexão via **HTTPS / TLS 1.3** (criptografia em trânsito). No entanto, o que acontece quando os dados chegam ao servidor e são salvos no banco de dados?
+
+Se os dados forem armazenados em **texto plano (plaintext)**:
+1. **Vazamento de Backups**: Um arquivo `.sql.gz` esquecido em um bucket S3 expõe todos os pacientes.
+2. **Acesso Indevido de Administradores (DBA) ou Suporte**: Funcionários com credencial de leitura conseguem ler diagnósticos, salários ou CPFs.
+3. **Invasão do Servidor de Banco**: Um atacante que explore uma falha no PostgreSQL tem acesso imediato a todas as tabelas.
+
+---
+
+## 1. Nível 1: A Grande Confusão (Codificação vs. Hash vs. Criptografia)
+
+Antes de falar em *Salt*, *Pepper* ou algoritmos criptográficos, é fundamental diferenciar com clareza três conceitos que são frequentemente misturados no dia a dia de desenvolvimento:
 
 ```mermaid
 flowchart TD
-    Data["Dado Original: '80.0 kg' ou 'Senha@123'"] --> Enc["Codificação (Base64 / Hex)"]
-    Data --> Hash["Hash Criptográfico (Argon2id / SHA-256)"]
-    Data --> Cipher["Criptografia (AES-256-GCM)"]
+    Original["Dado Original: '80.0 kg' ou 'Senha@123'"] --> Base64["1. Codificação (Base64 / Hex)"]
+    Original --> Hash["2. Hashing Criptográfico (Argon2id / SHA-256)"]
+    Original --> Cripto["3. Criptografia Simétrica (AES-256-GCM)"]
 
-    Enc --> EncOut["NÃO é segurança!<br/>Qualquer pessoa reverte sem chave."]
-    Hash --> HashOut["MÃO ÚNICA (Irreversível)<br/>Ninguém (nem a API) recupera o valor original.<br/>Só permite testar se um palpite confere."]
-    Cipher --> CipherOut["MÃO DUPLA COM CHAVE (Reversível)<br/>Quem tem a chave descriptografa de volta para '80.0 kg'.<br/>Quem não tem a chave vê apenas ruído aleatório."]
+    Base64 --> R1["NÃO É SEGURANÇA!<br/>Qualquer pessoa reverte sem precisar de chave."]
+    Hash --> R2["MÃO ÚNICA (Irreversível)<br/>Ninguém (nem a API) recupera o dado original.<br/>Serve apenas para testar se um palpite confere."]
+    Cripto --> R3["MÃO DUPLA COM CHAVE (Reversível)<br/>Quem tem a chave secreta descriptografa.<br/>Quem não tem a chave vê apenas ruído aleatório."]
 ```
 
-| Conceito | Direção | Precisa de Segredo? | Quando usar? | Exemplo neste Projeto |
+### Quadro Comparativo Definitivo
+
+| Conceito | Direção | Precisa de Chave? | Para que serve? | Exemplo Real no MedVault |
 | :--- | :---: | :---: | :--- | :--- |
-| **Codificação** (*Base64*, *Hex*) | Mão dupla (pública) | ❌ Não | Apenas para transportar bytes binários como texto em JSON/SQL | Empacotar o nonce e o ciphertext em `v1$<b64>$<b64>` |
-| **Hash de Senha** (*Argon2id*, *bcrypt*) | **Mão única** (irreversível) | ✅ Sim (Salt + Pepper) | Quando **ninguém** precisa ler o valor original de volta — apenas validar um login | Coluna `users.password_hash` |
-| **MAC / Blind Index** (*HMAC-SHA256*) | **Mão única determinística** | ✅ Sim (Pepper) | Quando precisamos fazer `WHERE campo = valor` sem revelar o dado real | Colunas `cpf_blind_index`, `email_blind_index`, `blood_type_blind_index` |
-| **Criptografia Autenticada (AEAD)** (*AES-256-GCM*) | **Mão dupla** (reversível com a chave) | ✅ Sim (Chave DEK + Nonce + AAD) | Quando a API **precisa ler e devolver** o dado (`80.0 kg`, `O+`, `Dipirona`), mas o banco não pode enxergá-lo | Todas as colunas `*_encrypted` |
+| **Codificação** (*Base64, Hex*) | Mão dupla pública | ❌ Não | Formatar bytes binários para transporte em JSON ou SQL. | Empacotar o nonce e o ciphertext em `v1$<nonce>$<ciphertext>`. |
+| **Hash de Senha** (*Argon2id, bcrypt*) | **Mão única (Irreversível)** | ✅ Sim (Salt + Pepper) | Quando **ninguém** precisa ler o dado original de volta (apenas conferir o login). | Coluna `users.password_hash`. |
+| **Blind Index** (*HMAC-SHA256*) | **Mão única determinística** | ✅ Sim (Pepper do Servidor) | Permitir buscas exatas por igualdade (`WHERE cpf = ?`) sem revelar o dado. | Colunas `cpf_blind_index`, `email_blind_index`. |
+| **Criptografia Autenticada (AEAD)** (*AES-256-GCM*) | **Mão dupla (Reversível)** | ✅ Sim (Chave Secreta + Nonce + AAD) | Quando a API **precisa ler e exibir** o dado de volta para o usuário autorizado. | Colunas `weight_kg_encrypted`, `full_name_encrypted`. |
 
 > [!WARNING]
-> **Por que "Hash + Salt + Pepper" sozinho NÃO serve para o peso (`80.0 kg`)?**
-> Se você aplicar um Hash irreversível (como Argon2 ou SHA-256 com Salt aleatório) sobre `80.0 kg` e salvar no banco, quando o médico abrir o prontuário do paciente na tela, **a API será incapaz de reverter o hash para mostrar `80.0 kg`**. Por isso, para campos que precisam ser lidos de volta, usamos **Salt + Pepper para derivar uma Chave de Criptografia (via HKDF)** e criptografamos o dado com **AES-256-GCM**!
+> **A Falácia do "Hash + Salt + Pepper" para o Peso do Paciente:**
+> Se aplicarmos um Hash irreversível (como Argon2id ou SHA-256) sobre o peso `"80.0 kg"`, quando o médico abrir a ficha do paciente na tela do sistema, **a API será matematicamente incapaz de exibir "80.0 kg" de volta**! Por isso, para dados que precisam ser lidos, usamos **Salt + Pepper para derivar uma Chave de Criptografia (via HKDF)** e ciframos o dado com **AES-256-GCM**.
 
 ---
 
-## 2. Glossário Visual com Analogias do Mundo Real
+## 2. Nível 2: O Triângulo dos Segredos (Salt, Pepper e Nonce)
 
-### 🧂 1. O que é **Salt** (Sal)?
-* **Definição Técnica**: Um valor público, longo e criptograficamente aleatório gerado individualmente para cada usuário ou registro e salvo no próprio banco de dados.
-* **Analogia**: Imagine que dois clientes pedem o mesmo prato ("Arroz com Feijão" = `80.0 kg`). O *Salt* é um tempero único sorteado para cada prato antes de fechá-lo. Mesmo que o prato base seja idêntico, a assinatura química final fica completamente diferente.
-* **No Projeto**:
-  * Nas senhas: O `Argon2id` gera automaticamente 16 bytes de Salt aleatório embutidos no hash (`$argon2id$v=19$m=19456,t=2,p=2$<SALT>$<HASH>`).
-  * Nos dados do usuário/prontuário: A coluna `users.user_salt` guarda 32 bytes aleatórios exclusivos de cada usuário.
+Por que a segurança moderna combina múltiplos elementos auxiliares em vez de apenas uma senha fixa?
 
-### 🌶️ 2. O que é **Pepper** (Pimenta)?
-* **Definição Técnica**: Um segredo de alta entropia configurado **fora do banco de dados** (em variáveis de ambiente, Vault ou AWS KMS).
-* **Analogia**: Se o banco de dados for roubado (ex: vazamento de um arquivo `.sql` de backup), o ladrão leva os cofres e os *Salts*, mas **não leva a Pimenta Secreta do Chef**, que fica trancada apenas na memória do servidor da API. Sem o *Pepper*, o backup do banco é inútil.
-* **No Projeto**: Temos **3 Peppers independentes** (separação de domínio) em [`config.py`](../src/app/core/config.py):
-  1. `APP_ENCRYPTION_PEPPER`: Usado para derivar as chaves de criptografia de campos.
-  2. `APP_BLIND_INDEX_PEPPER`: Usado para gerar os índices de busca cega.
-  3. `APP_PASSWORD_PEPPER`: Usado no pré-hash das senhas antes do Argon2id.
+### 🧂 1. Salt (Sal)
+* **O que é**: Um valor público, longo e criptograficamente aleatório gerado individualmente para cada usuário ou registro e **armazenado no próprio banco de dados**.
+* **Analogia**: Pense em duas pessoas que pedem o mesmo prato em um restaurante ("Arroz com Feijão"). O sal é um tempero exclusivo sorteado para cada prato. Mesmo que a receita base seja idêntica, a assinatura química de cada prato fica diferente.
+* **No MedVault**: Cada usuário ganha 32 bytes aleatórios salvos na coluna `users.user_salt`. O Argon2id também gera 16 bytes de salt exclusivo para a senha.
 
-### 🔑 3. O que é **HKDF** (*HMAC-based Key Derivation Function*)?
-* **Definição Técnica**: Algoritmo padrão (RFC 5869) que combina um segredo mestre (*Input Keying Material* = `APP_ENCRYPTION_PEPPER`) com um `user_salt` para gerar uma chave criptográfica exclusiva de 256 bits para cada usuário (**DEK — Data Encryption Key**).
-* **Por que é genial?**:
-  * Não precisamos armazenar a chave de criptografia do usuário no banco de dados!
-  * O banco guarda apenas o `user_salt` (que sozinho não serve para nada).
-  * A API guarda apenas o `APP_ENCRYPTION_PEPPER` (que é um só para toda a aplicação).
-  * Quando a API precisa ler ou gravar dados da **Alice**, ela junta `Pepper + Salt da Alice` no `HKDF` e obtém em microssegundos a **Chave Exclusiva da Alice**. Para o **Bruno**, `Pepper + Salt do Bruno` gera uma **Chave Exclusiva do Bruno** totalmente diferente!
+### 🌶️ 2. Pepper (Pimenta)
+* **O que é**: Um segredo corporativo de alta entropia mantido **estritamente fora do banco de dados** (armazenado em variáveis de ambiente, AWS KMS ou HashiCorp Vault).
+* **Analogia**: Se um invasor roubar um backup completo do banco de dados, ele leva os textos cifrados e os *Salts*, mas **não tem a pimenta secreta do cofre do servidor**. Sem a pimenta, o backup roubado é inútil.
+* **No MedVault**: Temos 3 Peppers independentes (separação de domínio):
+  1. `APP_ENCRYPTION_PEPPER`: Para derivar chaves de criptografia de campos.
+  2. `APP_PASSWORD_PEPPER`: Para o pré-hash de senhas antes do Argon2id.
+  3. `APP_BLIND_INDEX_PEPPER`: Para geração dos índices de busca cega.
 
-### 🎲 4. O que é **Nonce / IV** (*Number Used Once*)?
-* **Definição Técnica**: Um número aleatório de 96 bits (12 bytes) gerado a cada operação de criptografia no `AES-256-GCM`.
-* **Por que precisamos dele se cada usuário já tem sua própria chave HKDF?**:
-  * Imagine que a própria Alice pesa `80.0 kg` hoje, emagrece, e mês que vem volta a pesar `80.0 kg` — ou que dois campos diferentes do mesmo usuário tenham o mesmo valor `"80.0"`.
-  * Se não houvesse o *Nonce* aleatório por gravação, usar a mesma chave da Alice sobre o mesmo texto geraria o mesmo texto cifrado. Com o Nonce de 96 bits sorteado via `os.urandom(12)`, **até para o mesmo usuário o texto cifrado muda a cada gravação**!
-
-### 🛡️ 5. O que é **AEAD** (`AES-256-GCM`) e **AAD** (*Associated Authenticated Data*)?
-* **Definição Técnica**:
-  * **AEAD (*Authenticated Encryption with Associated Data*)**: Além de esconder o conteúdo (confidencialidade), gera um selo de integridade de 128 bits (**Auth Tag**). Se um único bit do texto cifrado for alterado no banco, a descriptografia recusa o dado na hora.
-  * **AAD (*Associated Authenticated Data*)**: Metadados de contexto (`user:{user_id}|field:{field_name}`) que são amarrados matematicamente ao selo de integridade daquele campo.
-* **Analogia do Lacre Nominal**:
-  * Imagine um envelope lacrado contendo `"80.0"`. Sem o AAD, um funcionário mal-intencionado do banco poderia copiar o envelope da coluna `peso` e colar na coluna `altura` do mesmo paciente (fazendo o paciente parecer ter `80 metros` de altura!).
-  * Com o **AAD**, o lacre de cera do envelope é fundido junto com a frase `"Pertence ao Usuário X | Coluna: weight_kg"`. Se alguém tentar abrir esse envelope na coluna `height_m` ou na linha do `Usuário Y`, o lacre quebra (`InvalidTag`)!
-
-### 🔍 6. O que é **Blind Index** (Índice Cego com `HMAC-SHA256`)?
-* **O Problema da Busca**: Como o `AES-256-GCM` gera um texto cifrado diferente a cada vez, o banco de dados não consegue fazer `WHERE cpf_encrypted = '...'`.
-* **A Solução**: Ao lado da coluna `cpf_encrypted`, criamos uma coluna `cpf_blind_index` que guarda:
-  $$\text{HMAC-SHA256}(\text{APP\_BLIND\_INDEX\_PEPPER}, \text{"cpf:12345678901"})$$
-* Quando alguém busca pelo CPF `123.456.789-01`, a API limpa a pontuação, calcula o mesmo `HMAC-SHA256` usando o Pepper e faz um `SELECT ... WHERE cpf_blind_index = 'a8f9...'` usando um índice B-Tree comum do PostgreSQL em $O(1)$!
+### 🎲 3. Nonce / IV (Number Used Once)
+* **O que é**: Um número de 96 bits (12 bytes) sorteado aleatoriamente **a cada operação de criptografia**.
+* **Por que precisamos dele?** Imagine que o próprio paciente Alice pesa `80.0 kg` em janeiro e volta a pesar `80.0 kg` em março. Se usássemos a mesma chave sem o Nonce, o texto cifrado gerado seria idêntico nas duas consultas. Com o Nonce aleatório, **até para o mesmo paciente o texto cifrado muda a cada gravação**!
 
 ---
 
-## 3. Matriz de Modelo de Ameaças (Threat Model)
+## 3. Nível 3: Os Três Pilares da Arquitetura do MedVault
 
-Esta tabela é excelente para mostrar em apresentações executivas ou técnicas **o que acontece em cada cenário de incidente de segurança**:
-
-| Cenário de Ataque / Vazamento | O que o Atacante Obteve? | O Atacante consegue ler os Prontuários (`80 kg`, `O+`)? | O Atacante consegue descobrir que Alice e Bruno têm o mesmo peso? | O Atacante consegue quebrar as Senhas? | O Atacante consegue copiar dados de um usuário para outro? |
-| :--- | :--- | :---: | :---: | :---: | :---: |
-| **1. Vazamento de Backup SQL / SQL Injection de Leitura** | Dump completo das tabelas `users` e `medical_records` (incluindo `user_salt` e `*_blind_index`) | ❌ **NÃO** (Falta o `APP_ENCRYPTION_PEPPER` para derivar as chaves HKDF) | ❌ **NÃO** (Ciphertexts, chaves e nonces são 100% diferentes) | ❌ **NÃO** (Falta o `APP_PASSWORD_PEPPER` + proteção Argon2id) | N/A (Apenas leitura) |
-| **2. DBA Malicioso com Acesso de Escrita ao Banco** | Acesso total `SELECT / UPDATE / INSERT` no PostgreSQL, mas sem acesso às variáveis de ambiente da API | ❌ **NÃO** | ❌ **NÃO** | ❌ **NÃO** | ❌ **BLOQUEADO** (O `AAD` e a chave `HKDF` lançam `InvalidTag` se trocar linhas ou colunas) |
-| **3. Vazamento apenas do `.env` (sem acesso ao Banco)** | Os Peppers do servidor, mas nenhum `user_salt` nem textos cifrados | ❌ **NÃO** (Não possui os dados nem os `user_salt` do banco) | ❌ **NÃO** | ❌ **NÃO** | ❌ **NÃO** |
-
----
-
-## 4. Roteiro Passo a Passo para Demonstração ao Vivo (5 a 10 minutos)
-
-Use este roteiro quando for apresentar o projeto ao vivo para uma banca, equipe ou cliente:
-
-### Passo 1: Mostrar a Prova no Terminal (1 minuto)
-Execute:
-```bash
-bash scripts/demo-scenario.sh
 ```
-* **O que destacar na tela**:
-  1. Mostre no JSON impresso que `user_a` (Alice) e `user_b` (Bruno) têm `shared_plaintext_value: 80.0` no campo `weight_kg`.
-  2. Aponte para `user_a_ciphertext` e `user_b_ciphertext`: são completamente diferentes!
-  3. Aponte para `tamper_checks.all_attacks_blocked: true`: mostre os 3 ataques bloqueados em tempo real.
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                         ARQUITETURA EM 3 PILARES                                 │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│ PILAR 1: CRIPTOGRAFIA AUTENTICADA COM ISOLAMENTO POR USUÁRIO                     │
+│ HKDF-SHA256(APP_ENCRYPTION_PEPPER + user_salt) ──► Chave DEK Exclusiva (256-bit) │
+│ AES-256-GCM(DEK, Nonce 96-bit aleatório, AAD = user_id + field_name)             │
+│ ► Usado em: Peso, Altura, Diagnósticos, Alergias, Nome, CPF, E-mail              │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│ PILAR 2: BUSCA CEGA EM O(1) (BLIND INDEX)                                        │
+│ HMAC-SHA256(APP_BLIND_INDEX_PEPPER, "campo:valor_normalizado")                   │
+│ ► Usado em: Busca instantânea por CPF, E-mail e Tipo Sanguíneo no banco          │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│ PILAR 3: HASH DE SENHA IRREVERSÍVEL E RESISTENTE A GPUS                          │
+│ HMAC-SHA256(APP_PASSWORD_PEPPER, senha) ──► Argon2id(Salt 16B aleatório)         │
+│ ► Usado em: Autenticação de Usuários (/api/v1/auth/login)                        │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
 
-### Passo 2: Explorar pelo Swagger UI (3 minutos)
-Suba o servidor (`bash scripts/dev.sh` ou `bash scripts/up.sh`) e abra `http://localhost:8000/docs`:
-1. Execute **`POST /api/v1/demo/crypto-playground`**:
-   * Envie `sample_plaintext: "80.0"` e clique em **Execute**.
-   * Mostre que `user_1_simulation.ciphertext`, `user_2_simulation.ciphertext` e até `same_user_second_encryption.ciphertext` são todos diferentes, mas `decrypted_back` retorna `"80.0"` em todos!
-2. Execute **`POST /api/v1/demo/seed-comparison`** e copie o `user_a_id`.
-3. Cole o `user_a_id` em **`GET /api/v1/demo/inspect-user/{user_id}`**:
-   * Mostre a anatomia interna de cada coluna: o `raw_database_value`, o `nonce_hex`, a `gcm_auth_tag_hex` e o `aad_context`.
+### Detalhamento do Pilar 1: Derivação de Chave (HKDF) + AES-256-GCM + O Escudo do AAD
 
-### Passo 3: Demonstrar a Busca Cega em O(1) (2 minutos)
-Ainda no Swagger UI:
-1. Vá em **`GET /api/v1/users/search/by-cpf`** e digite `111.222.333-44` (com pontos e traço) ou `11122233344` (sem pontuação).
-2. Mostre que a API encontrou instantaneamente a paciente Alice pelo `cpf_blind_index` e devolveu todos os dados descriptografados junto com o IMC calculado (`bmi: 26.12`).
-3. Vá em **`GET /api/v1/medical-records/search/by-blood-type`** e filtre por `O+`: mostre que ele encontra todos os pacientes `O+` sem precisar descriptografar pacientes de outros tipos sanguíneos!
+1. **Derivação de Chave por Usuário (`HKDF-SHA256`)**:
+   Não armazenamos as chaves dos usuários no banco de dados. Quando a API precisa salvar um dado da Alice, ela combina o `APP_ENCRYPTION_PEPPER` do servidor com o `user_salt` da Alice através do HKDF (RFC 5869) e gera em microssegundos uma **Data Encryption Key (DEK)** de 256 bits exclusiva dela.
+2. **Criptografia Autenticada com Dados Associados (AEAD)**:
+   O modo GCM do AES não apenas esconde o dado, mas calcula uma **Tag de Autenticação** de 128 bits. Se alguém alterar 1 único bit do texto cifrado no banco, a descriptografia falha.
+3. **O Escudo do AAD (Associated Authenticated Data)**:
+   O AAD é o contexto em texto claro que é fundido matematicamente à Tag de autenticação:
+   $$\text{AAD} = \text{"user:}\{\text{user\_id}\}\text{|field:}\{\text{field\_name}\}\text{"}$$
+   * **O Ataque de Transplante**: Imagine um atacante com acesso SQL que copia o texto cifrado do peso da Alice e cola na linha do Bruno, ou cola na coluna de altura da própria Alice.
+   * **A Defesa**: Quando a API tentar descriptografar o peso na linha do Bruno, o `user_id` do AAD será diferente do AAD usado na cifragem, gerando um erro fatal `CryptoIntegrityError (InvalidTag)`.
+
+---
+
+## 4. Nível 4: Threat Model (Matriz de Ameaças e Vetores de Ataque)
+
+| Vetor de Ataque | O que o Atacante Tenta Fazer | Por que o MedVault Bloqueia? |
+| :--- | :--- | :--- |
+| **Vazamento do Backup SQL** | Despeja a tabela `users` e `medical_records` na internet. | O banco só contém nonces e ciphertexts. Sem os Peppers da aplicação, os dados são indistinguíveis de ruído aleatório. |
+| **Análise de Frequência** | Agrupar pacientes com o mesmo texto cifrado para deduzir quem tem o diagnóstico mais comum. | Impossível. O Nonce aleatório de 96 bits garante que valores iguais gerem cifras completamente diferentes. |
+| **Transplante de Coluna** | Copiar o texto cifrado da coluna `peso` e colar na coluna `altura` do mesmo paciente. | O **AAD** (`field:weight_kg`) rejeita a descriptografia quando executada na coluna `height_m`. |
+| **Transplante entre Usuários** | Copiar o texto cifrado de um usuário e colar na conta de outro. | O **AAD** vincula o `user_id` e cada usuário possui uma chave derivada diferente via HKDF. |
+| **Quebra de Senhas por GPU** | Usar clusters de placas de vídeo para quebrar hashes com dicionários. | O **Argon2id** exige 19 MiB de memória RAM e múltiplas iterações por tentativa, tornando ataques massivos por GPU inviáveis. Além disso, o Pepper do servidor impede ataques offline. |
+| **Varredura Completa de Tabela (Full Table Scan)** | Um atacante força buscas lentas para causar negação de serviço (DoS) ou extrair dados. | As buscas utilizam o **Blind Index**, que busca via índice B-Tree indexado padrão em $O(1)$. |

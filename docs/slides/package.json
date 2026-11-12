@@ -1,0 +1,18 @@
+{
+  "name": "medvault-slides",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev:cripto": "slidev 01-criptografia-no-banco.md --port 3030 --open",
+    "dev:arquitetura": "slidev 02-arquitetura-e-clean-code.md --port 3031 --open",
+    "build:cripto": "slidev build 01-criptografia-no-banco.md --out dist/criptografia",
+    "build:arquitetura": "slidev build 02-arquitetura-e-clean-code.md --out dist/arquitetura",
+    "export:pdf:cripto": "slidev export 01-criptografia-no-banco.md --output criptografia-no-banco.pdf",
+    "export:pdf:arquitetura": "slidev export 02-arquitetura-e-clean-code.md --output arquitetura-e-clean-code.pdf"
+  },
+  "dependencies": {
+    "@slidev/cli": "^0.49.0",
+    "@slidev/theme-default": "latest",
+    "@slidev/theme-seriph": "latest"
+  }
+}
