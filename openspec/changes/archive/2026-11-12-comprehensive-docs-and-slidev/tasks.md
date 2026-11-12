@@ -32,5 +32,5 @@
 ## 5. Validação e Integração Git
 
 - [x] 5.1 Executar os testes automatizados da aplicação (`pytest`) e linters (`ruff`) para garantir que o ambiente permanece íntegro.
-- [ ] 5.2 Retornar à branch `main` e realizar o merge com squash (`git merge --squash docs/comprehensive-knowledge-and-slidev`).
-- [ ] 5.3 Realizar commit final consolidado na branch `main`.
+- [x] 5.2 Retornar à branch `main` e realizar o merge com squash (`git merge --squash docs/comprehensive-knowledge-and-slidev`).
+- [x] 5.3 Realizar commit final consolidado na branch `main`.
