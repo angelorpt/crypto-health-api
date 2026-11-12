@@ -1,0 +1,44 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: medvault-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-medvault}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-medvault_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-medvault_db}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - medvault_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-medvault} -d ${POSTGRES_DB:-medvault_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: medvault-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_NAME: "MedVault Crypto API"
+      APP_ENV: ${APP_ENV:-development}
+      APP_DEBUG: ${APP_DEBUG:-true}
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-medvault}:${POSTGRES_PASSWORD:-medvault_secret}@db:5432/${POSTGRES_DB:-medvault_db}"
+      APP_ENCRYPTION_PEPPER: ${APP_ENCRYPTION_PEPPER:-demo-master-encryption-pepper-change-in-prod-9f8e7d6c5b4a3210}
+      APP_PASSWORD_PEPPER: ${APP_PASSWORD_PEPPER:-demo-password-secret-pepper-change-in-prod-1a2b3c4d5e6f7a8b}
+      APP_BLIND_INDEX_PEPPER: ${APP_BLIND_INDEX_PEPPER:-demo-blind-index-pepper-change-in-prod-7f6e5d4c3b2a1908}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-demo-jwt-secret-key-change-in-production-32bytes-minimum}
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+volumes:
+  medvault_pgdata:
